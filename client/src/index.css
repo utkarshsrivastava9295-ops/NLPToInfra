@@ -1,0 +1,40 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-ink-950 text-slate-100 antialiased;
+  background-image: radial-gradient(
+      ellipse 120% 80% at 50% -30%,
+      rgba(94, 234, 212, 0.12),
+      transparent
+    ),
+    radial-gradient(ellipse 60% 40% at 100% 0%, rgba(251, 113, 133, 0.08), transparent);
+}
+
+/* React Flow overrides */
+.react-flow__background {
+  @apply bg-transparent;
+}
+
+.react-flow__controls {
+  @apply overflow-hidden rounded-xl border border-white/10 bg-ink-900/90 shadow-xl backdrop-blur;
+}
+
+.react-flow__controls-button {
+  @apply border-white/10 bg-transparent fill-slate-300;
+}
+
+.react-flow__controls-button:hover {
+  @apply bg-white/5;
+}
+
+.react-flow__minimap {
+  @apply overflow-hidden rounded-xl border border-white/10 bg-ink-900/80;
+}
