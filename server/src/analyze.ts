@@ -9,6 +9,13 @@ import {
 import { ARCHITECT_SYSTEM_PROMPT } from "./prompt.js";
 import { AnalysisResultSchema, type AnalysisResult } from "./schema.js";
 import { mockAnalysis } from "./mockAnalysis.js";
+import { fetchGithubRepoContext } from "./repoContext.js";
+
+/** User text + optional repo snapshot; cap for provider context limits. */
+const MAX_ANALYSIS_PROMPT_CHARS = Math.min(
+  Number(process.env.ANALYZE_CONTEXT_MAX_CHARS) || 150_000,
+  400_000,
+);
 
 function stripJsonFence(text: string): string {
   const t = text.trim();
@@ -118,7 +125,7 @@ async function analyzeOpenAI(
       { role: "system", content: ARCHITECT_SYSTEM_PROMPT },
       {
         role: "user",
-        content: `User requirements:\n"""${userText.slice(0, 12000)}"""`,
+        content: `User requirements:\n"""${userText.slice(0, MAX_ANALYSIS_PROMPT_CHARS)}"""`,
       },
     ],
     response_format: { type: "json_object" },
@@ -157,6 +164,33 @@ function resolveLocalLlmBaseUrl(): string {
 
 function localLlmApiKey(): string {
   return process.env.LOCAL_LLM_API_KEY?.trim() || "ollama";
+}
+
+/**
+ * Local models default to a small max output; large Terraform + supplemental JSON needs many tokens.
+ * Ollama/OpenAI-compat: `max_tokens`. Override with LOCAL_LLM_MAX_TOKENS (e.g. 65536).
+ */
+function localLlmMaxOutputTokens(): number {
+  const fromEnv = Number(process.env.LOCAL_LLM_MAX_TOKENS);
+  if (Number.isFinite(fromEnv) && fromEnv >= 1024) {
+    return Math.min(Math.floor(fromEnv), 131_072);
+  }
+  return 32_768;
+}
+
+function assertLocalCompletionNotTruncated(
+  completion: OpenAI.Chat.ChatCompletion,
+): void {
+  const fr = completion.choices[0]?.finish_reason;
+  if (fr === "length") {
+    throw new Error(
+      [
+        "Local model output was truncated (hit max_tokens).",
+        "Set LOCAL_LLM_MAX_TOKENS higher in server .env (e.g. 65536), or lower ANALYZE_CONTEXT_MAX_CHARS / omit repo URL.",
+        "Very small local context windows cannot fit full Terraform — use a larger model or cloud API.",
+      ].join(" "),
+    );
+  }
 }
 
 function formatLocalConnectionError(baseURL: string, cause: unknown): Error {
@@ -218,18 +252,23 @@ async function analyzeLocalOpenAICompatible(
       { role: "system", content: ARCHITECT_SYSTEM_PROMPT },
       {
         role: "user",
-        content: `User requirements:\n"""${userText.slice(0, 12000)}"""${localUserSuffix}`,
+          content: `User requirements:\n"""${userText.slice(0, MAX_ANALYSIS_PROMPT_CHARS)}"""${localUserSuffix}`,
       },
     ];
 
     const tryJsonMode = process.env.LOCAL_LLM_JSON_MODE?.trim() !== "0";
+    const localBase = {
+      model,
+      temperature: 0.25,
+      messages,
+      max_tokens: localLlmMaxOutputTokens(),
+    } satisfies OpenAI.Chat.ChatCompletionCreateParamsNonStreaming;
+
     let completion: OpenAI.Chat.ChatCompletion;
     if (tryJsonMode) {
       try {
         completion = await client.chat.completions.create({
-          model,
-          temperature: 0.25,
-          messages,
+          ...localBase,
           response_format: { type: "json_object" },
         });
       } catch (err) {
@@ -239,28 +278,36 @@ async function analyzeLocalOpenAICompatible(
             m,
           )
         ) {
-          completion = await client.chat.completions.create({
-            model,
-            temperature: 0.25,
-            messages,
-          });
+          completion = await client.chat.completions.create(localBase);
         } else {
           throw err;
         }
       }
     } else {
-      completion = await client.chat.completions.create({
-        model,
-        temperature: 0.25,
-        messages,
-      });
+      completion = await client.chat.completions.create(localBase);
     }
+
+    assertLocalCompletionNotTruncated(completion);
 
     const raw = completion.choices[0]?.message?.content;
     if (!raw) {
       throw new Error("Empty model response");
     }
-    return parseAnalysisJson(raw);
+    try {
+      return parseAnalysisJson(raw);
+    } catch (parseErr) {
+      const msg = parseErr instanceof Error ? parseErr.message : String(parseErr);
+      if (
+        /non-JSON|Invalid analysis shape/i.test(msg) &&
+        /[{\[]/.test(raw) &&
+        !/\}\s*$/.test(raw.trim())
+      ) {
+        throw new Error(
+          `${msg} Response may be truncated — raise LOCAL_LLM_MAX_TOKENS or shorten the prompt/repo context.`,
+        );
+      }
+      throw parseErr;
+    }
   } catch (e) {
     throw formatLocalConnectionError(baseURL, e);
   }
@@ -350,7 +397,7 @@ async function analyzeGemini(
     },
   });
 
-  const prompt = `User requirements:\n"""${userText.slice(0, 12000)}"""`;
+  const prompt = `User requirements:\n"""${userText.slice(0, MAX_ANALYSIS_PROMPT_CHARS)}"""`;
   const maxAttemptsTransient = 6;
   const maxAttemptsQuota = 3;
   let lastError: unknown;
@@ -386,6 +433,8 @@ async function analyzeGemini(
 export type AnalyzeRequirementsOptions = {
   provider: LlmProvider;
   model?: string;
+  /** Optional public GitHub HTTPS URL; server fetches a zip snapshot for context. */
+  repoUrl?: string;
 };
 
 export type AnalyzeKeys = {
@@ -404,12 +453,25 @@ export async function analyzeRequirements(
   demo_mode: boolean;
 }> {
   const provider = options.provider;
+  const repoUrl = options.repoUrl?.trim();
+  const repoRequested = Boolean(repoUrl);
+
+  let effectiveText = userText;
+  if (repoUrl) {
+    try {
+      const ctx = await fetchGithubRepoContext(repoUrl);
+      effectiveText = `${userText}\n\n---\nApplication repository URL: ${repoUrl}\n\n${ctx}`;
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      effectiveText = `${userText}\n\n---\nApplication repository URL: ${repoUrl}\n\n(Repository fetch failed: ${msg})`;
+    }
+  }
 
   if (provider === "local") {
     const baseURL = resolveLocalLlmBaseUrl();
     const model = resolveLocalModel(options.model);
     const data = await analyzeLocalOpenAICompatible(
-      userText,
+      effectiveText,
       baseURL,
       localLlmApiKey(),
       model,
@@ -427,13 +489,13 @@ export async function analyzeRequirements(
     const model = resolveOpenAIModel(options.model);
     if (!key) {
       return {
-        data: mockAnalysis(userText),
+        data: mockAnalysis(userText, { repoRequested }),
         resolvedProvider: "openai",
         resolvedModel: model,
         demo_mode: true,
       };
     }
-    const data = await analyzeOpenAI(userText, key, model);
+    const data = await analyzeOpenAI(effectiveText, key, model);
     return {
       data,
       resolvedProvider: "openai",
@@ -446,13 +508,13 @@ export async function analyzeRequirements(
   const model = resolveGeminiModel(options.model);
   if (!key) {
     return {
-      data: mockAnalysis(userText),
+      data: mockAnalysis(userText, { repoRequested }),
       resolvedProvider: "gemini",
       resolvedModel: model,
       demo_mode: true,
     };
   }
-  const data = await analyzeGemini(userText, key, model);
+  const data = await analyzeGemini(effectiveText, key, model);
   return {
     data,
     resolvedProvider: "gemini",
