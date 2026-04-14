@@ -1,7 +1,15 @@
 import type { AnalysisResult } from "./schema.js";
 
+export type MockAnalysisOptions = {
+  /** User provided a repo URL (demo adds sample Dockerfile / Helm / workflow stubs). */
+  repoRequested?: boolean;
+};
+
 /** Deterministic fallback when the selected provider has no API key (demo / local dev). */
-export function mockAnalysis(userText: string): AnalysisResult {
+export function mockAnalysis(
+  userText: string,
+  opts?: MockAnalysisOptions,
+): AnalysisResult {
   const prod =
     /\b(prod|production|high availability|ha\b|zero downtime|sla|24\/7)\b/i.test(
       userText,
@@ -128,8 +136,14 @@ export function mockAnalysis(userText: string): AnalysisResult {
       ),
       risk_notes: [
         "This is static mock output. Set OPENAI_API_KEY or GEMINI_API_KEY for AI-driven sizing and Terraform.",
+        ...(opts?.repoRequested
+          ? [
+              "Demo supplemental files (Docker / Helm / workflow) are placeholders; live analysis tailors them to your repo.",
+            ]
+          : []),
       ],
       terraform_files: buildMockTerraform(prod, budget),
+      supplemental_files: opts?.repoRequested ? buildMockSupplemental() : [],
     };
   }
 
@@ -145,9 +159,83 @@ export function mockAnalysis(userText: string): AnalysisResult {
     edges,
     risk_notes: [
       "Mock Terraform is illustrative; replace container images, subnets, and ACM ARNs before apply.",
+      ...(opts?.repoRequested
+        ? [
+            "Demo supplemental files are generic; with a real API key and repo URL, outputs align to your codebase.",
+          ]
+        : []),
     ],
     terraform_files: buildMockTerraform(prod, budget),
+    supplemental_files: opts?.repoRequested ? buildMockSupplemental() : [],
   };
+}
+
+function buildMockSupplemental(): NonNullable<AnalysisResult["supplemental_files"]> {
+  return [
+    {
+      path: "Dockerfile",
+      content: `# Demo placeholder — replace with a multi-stage build matching your repo (Node/Python/Go, etc.)
+FROM node:20-alpine AS base
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --omit=dev
+COPY . .
+RUN npm run build
+EXPOSE 3000
+USER node
+CMD ["npm", "start"]
+`,
+    },
+    {
+      path: ".github/workflows/build-and-push.yml",
+      content: `name: build-and-push
+on:
+  push:
+    branches: [main]
+env:
+  AWS_REGION: us-east-1
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-region: \${{ env.AWS_REGION }}
+          role-to-assume: \${{ secrets.AWS_ROLE_TO_ASSUME }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - name: Build and push
+        run: |
+          docker build -t $ECR_REGISTRY/\${{ github.repository }}:$GITHUB_SHA .
+          docker push $ECR_REGISTRY/\${{ github.repository }}:$GITHUB_SHA
+`,
+    },
+    {
+      path: "helm/myapp/Chart.yaml",
+      content: `apiVersion: v2
+name: myapp
+description: Demo chart (replace with your service)
+type: application
+version: 0.1.0
+appVersion: "1.0.0"
+`,
+    },
+    {
+      path: "helm/myapp/values.yaml",
+      content: `image:
+  repository: REPLACE_WITH_ECR_URL
+  tag: latest
+  pullPolicy: IfNotPresent
+service:
+  type: ClusterIP
+  port: 80
+resources: {}
+`,
+    },
+  ];
 }
 
 function buildMockTerraform(prod: boolean, budget: number): AnalysisResult["terraform_files"] {

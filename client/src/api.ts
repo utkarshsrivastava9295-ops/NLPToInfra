@@ -1,5 +1,5 @@
 import type { AiProvider } from "./aiOptions";
-import type { AnalyzeResponse, TerraformFile } from "./types";
+import type { AnalyzeResponse } from "./types";
 
 export async function fetchApiConfig(): Promise<{
   openai_configured: boolean;
@@ -15,11 +15,18 @@ export async function analyze(
   text: string,
   provider: AiProvider,
   model: string,
+  repoUrl?: string,
 ): Promise<AnalyzeResponse> {
+  const trimmedRepo = repoUrl?.trim();
   const res = await fetch("/api/analyze", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text, provider, model }),
+    body: JSON.stringify({
+      text,
+      provider,
+      model,
+      ...(trimmedRepo ? { repo_url: trimmedRepo } : {}),
+    }),
   });
   if (!res.ok) {
     const j = await res.json().catch(() => ({}));
@@ -28,18 +35,28 @@ export async function analyze(
   return res.json() as Promise<AnalyzeResponse>;
 }
 
-export async function downloadTerraformZip(files: TerraformFile[]): Promise<void> {
+/**
+ * ZIP uses a structured layout: SETUP.md, terraform/, docker/, delivery/, .github/, helm/, etc.
+ */
+export async function downloadInfraBundle(
+  response: AnalyzeResponse,
+  downloadName = "nlp-to-infra-bundle.zip",
+): Promise<void> {
   const res = await fetch("/api/terraform-zip", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ files }),
+    body: JSON.stringify({
+      layout: "structured",
+      terraform_files: response.terraform_files,
+      supplemental_files: response.supplemental_files ?? [],
+    }),
   });
   if (!res.ok) throw new Error("Download failed");
   const blob = await res.blob();
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = "nlp-to-infra-terraform.zip";
+  a.download = downloadName;
   a.click();
   URL.revokeObjectURL(url);
 }

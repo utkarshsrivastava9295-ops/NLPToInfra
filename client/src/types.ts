@@ -29,10 +29,13 @@ export type AnalyzeResponse = {
   edges: InfraEdge[];
   risk_notes?: string[];
   terraform_files: TerraformFile[];
+  /** Dockerfile, Helm, GitHub Actions, etc. (when repo URL was used or model emits them). */
+  supplemental_files?: TerraformFile[];
   _meta?: {
     demo_mode?: boolean;
     provider?: "openai" | "gemini" | "local";
     model?: string;
+    repo_url?: string;
     openai_configured?: boolean;
     gemini_configured?: boolean;
     local_configured?: boolean;

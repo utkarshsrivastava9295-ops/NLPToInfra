@@ -51,11 +51,13 @@ app.post("/api/analyze", async (req, res) => {
     const provider = parseProvider(req.body?.provider);
     const model =
       typeof req.body?.model === "string" ? req.body.model : undefined;
+    const repo_url =
+      typeof req.body?.repo_url === "string" ? req.body.repo_url : undefined;
 
     const { data, resolvedProvider, resolvedModel, demo_mode } =
       await analyzeRequirements(
         text,
-        { provider, model },
+        { provider, model, repoUrl: repo_url },
         {
           openai: process.env.OPENAI_API_KEY,
           gemini: geminiKey(),
@@ -68,6 +70,7 @@ app.post("/api/analyze", async (req, res) => {
         demo_mode,
         provider: resolvedProvider,
         model: resolvedModel,
+        repo_url: repo_url?.trim() || undefined,
         openai_configured: Boolean(process.env.OPENAI_API_KEY?.trim()),
         gemini_configured: Boolean(geminiKey()),
         local_configured: true,
@@ -82,7 +85,12 @@ app.post("/api/analyze", async (req, res) => {
 app.post("/api/terraform-zip", async (req, res) => {
   const parsed = parseZipBody(req.body);
   if (!parsed.success) {
-    res.status(400).json({ error: "Invalid body: expected { files: [{ path, content }] }" });
+    const detail = parsed.error.issues
+      .map((i) => `${i.path.join(".")}: ${i.message}`)
+      .join("; ");
+    res.status(400).json({
+      error: `Invalid body: ${detail}. Send { layout?, terraform_files?, supplemental_files? } or legacy { files }.`,
+    });
     return;
   }
   if (!parsed.data.files.length) {
